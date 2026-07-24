@@ -8,7 +8,7 @@
 # Purpose: Create query-ready, business-focused analytics tables
 
 from pyspark.sql import functions as F, Window
-from pyspark.sql.types import StructType, StructField, StringType, DateType, DoubleType, LongType, IntegerType
+from pyspark.sql.types import LongType
 
 # Unity Catalog Configuration
 CATALOG_NAME = "StockMarketLakehouse"
@@ -382,6 +382,7 @@ print(f"Writing to {GOLD_TOP_MOVERS}...")
 df_top_movers.write \
     .format("delta") \
     .mode("overwrite") \
+    .option("overwriteSchema", "true") \
     .partitionBy("date", "mover_type") \
     .saveAsTable(GOLD_TOP_MOVERS)
 

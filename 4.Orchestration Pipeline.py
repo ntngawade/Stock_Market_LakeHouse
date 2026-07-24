@@ -132,19 +132,14 @@ def run_bronze_layer(start_date, end_date):
         import pandas as pd
         from datetime import datetime
         
-        # Nifty 50 tickers
-        NIFTY_50_TICKERS = [
-            'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS',
-            'HINDUNILVR.NS', 'ITC.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'KOTAKBANK.NS',
-            'LT.NS', 'AXISBANK.NS', 'ASIANPAINT.NS', 'MARUTI.NS', 'HCLTECH.NS',
-            'SUNPHARMA.NS', 'TITAN.NS', 'BAJFINANCE.NS', 'ULTRACEMCO.NS', 'NESTLEIND.NS',
-            'WIPRO.NS', 'ONGC.NS', 'NTPC.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS',
-            'POWERGRID.NS', 'M&M.NS', 'TECHM.NS', 'ADANIPORTS.NS', 'BAJAJFINSV.NS',
-            'COALINDIA.NS', 'DRREDDY.NS', 'INDUSINDBK.NS', 'CIPLA.NS', 'GRASIM.NS',
-            'EICHERMOT.NS', 'JSWSTEEL.NS', 'BRITANNIA.NS', 'DIVISLAB.NS', 'HINDALCO.NS',
-            'HEROMOTOCO.NS', 'SHREECEM.NS', 'UPL.NS', 'APOLLOHOSP.NS', 'TATACONSUM.NS',
-            'SBILIFE.NS', 'ADANIENT.NS', 'BAJAJ-AUTO.NS', 'HDFCLIFE.NS', 'BPCL.NS'
-        ]
+        # Load Nifty 50 tickers dynamically from config table
+        tickers_df = spark.table(f"{CATALOG_NAME}.config.nifty50_tickers") \
+            .filter("is_active = true") \
+            .select("ticker_symbol") \
+            .orderBy("ticker_id")
+        
+        NIFTY_50_TICKERS = [row.ticker_symbol for row in tickers_df.collect()]
+        print(f"Loaded {len(NIFTY_50_TICKERS)} active tickers from config table")
         
         BRONZE_TABLE = f"{CATALOG_NAME}.bronze.stock_prices_raw"
         
@@ -343,19 +338,18 @@ def run_gold_layer():
         print(f"Reading from {SILVER_TABLE}...")
         df_silver = spark.table(SILVER_TABLE)
         
-        # Join with sector mapping (create if not exists)
+        # Join with sector mapping (create from config table if not exists)
         if not spark.catalog.tableExists(SECTOR_TABLE):
-            print("Creating sector mapping table...")
-            sector_data = [
-                ('HDFCBANK', 'Financial Services'), ('ICICIBANK', 'Financial Services'),
-                ('KOTAKBANK', 'Financial Services'), ('AXISBANK', 'Financial Services'),
-                ('SBIN', 'Financial Services'), ('TCS', 'IT Services'), ('INFY', 'IT Services'),
-                ('HCLTECH', 'IT Services'), ('WIPRO', 'IT Services'), ('RELIANCE', 'Oil & Gas'),
-                ('HINDUNILVR', 'FMCG'), ('ITC', 'FMCG'), ('SUNPHARMA', 'Pharma'),
-                ('MARUTI', 'Auto'), ('TATASTEEL', 'Metals & Mining')
-            ]
-            spark.createDataFrame(sector_data, ["ticker_standard", "sector"]) \
+            print("Creating sector mapping table from config...")
+            CONFIG_TABLE = f"{CATALOG_NAME}.config.nifty50_tickers"
+            spark.table(CONFIG_TABLE) \
+                .filter("is_active = true") \
+                .select(
+                    F.col("ticker_clean").alias("ticker_standard"),
+                    F.col("sector")
+                ).distinct() \
                 .write.format("delta").mode("overwrite").saveAsTable(SECTOR_TABLE)
+            print(f"Created sector mapping from {CONFIG_TABLE}")
         
         df_sectors = spark.table(SECTOR_TABLE)
         df_silver_with_sector = df_silver.join(df_sectors, on="ticker_standard", how="left")
@@ -379,7 +373,7 @@ def run_gold_layer():
         df_stock_metrics.select(
             "ticker_standard", "sector", "date", "open", "high", "low", "close", "volume",
             "daily_return_pct", "price_range", "ma_20", "ma_50", "ma_200", "trend_signal"
-        ).write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy("date").saveAsTable(GOLD_STOCK_METRICS)
+        ).write.format("delta").mode("overwrite").partitionBy("date").saveAsTable(GOLD_STOCK_METRICS)
         
         # Write Gold Table 2: Sector Metrics
         GOLD_SECTOR_METRICS = f"{CATALOG_NAME}.gold.sector_daily_metrics"
@@ -387,7 +381,7 @@ def run_gold_layer():
             F.count("ticker_standard").alias("stock_count"),
             F.round(F.avg("daily_return_pct"), 2).alias("avg_daily_return_pct"),
             F.sum("volume").alias("total_volume")
-        ).write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy("date").saveAsTable(GOLD_SECTOR_METRICS)
+        ).write.format("delta").mode("overwrite").partitionBy("date").saveAsTable(GOLD_SECTOR_METRICS)
         
         # Write Gold Table 3: Top Movers
         GOLD_TOP_MOVERS = f"{CATALOG_NAME}.gold.top_movers_daily"
@@ -395,7 +389,7 @@ def run_gold_layer():
         df_stock_metrics.withColumn("rank", F.row_number().over(window_rank)) \
             .filter(F.col("rank") <= 10) \
             .select("date", "ticker_standard", "sector", "daily_return_pct", "close") \
-            .write.format("delta").mode("overwrite").option("overwriteSchema", "true").partitionBy("date").saveAsTable(GOLD_TOP_MOVERS)
+            .write.format("delta").mode("overwrite").partitionBy("date").saveAsTable(GOLD_TOP_MOVERS)
         
         table_count = 3
         total_records = df_stock_metrics.count()

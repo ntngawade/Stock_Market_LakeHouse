@@ -450,6 +450,3 @@ else:
 # MAGIC
 # MAGIC ### Next Steps:
 # MAGIC **Gold Layer** (Step 7) - Business-level aggregations and analytics
-
-# COMMAND ----------
-

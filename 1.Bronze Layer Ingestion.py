@@ -12,19 +12,32 @@ import pandas as pd
 # Unity Catalog Configuration
 CATALOG_NAME = "StockMarketLakehouse"
 
-# Nifty 50 tickers (NSE symbols with .NS suffix for yfinance)
-NIFTY_50_TICKERS = [
-    'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS',
-    'HINDUNILVR.NS', 'ITC.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'KOTAKBANK.NS',
-    'LT.NS', 'AXISBANK.NS', 'ASIANPAINT.NS', 'MARUTI.NS', 'HCLTECH.NS',
-    'SUNPHARMA.NS', 'TITAN.NS', 'BAJFINANCE.NS', 'ULTRACEMCO.NS', 'NESTLEIND.NS',
-    'WIPRO.NS', 'ONGC.NS', 'NTPC.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS',
-    'POWERGRID.NS', 'M&M.NS', 'TECHM.NS', 'ADANIPORTS.NS', 'BAJAJFINSV.NS',
-    'COALINDIA.NS', 'DRREDDY.NS', 'INDUSINDBK.NS', 'CIPLA.NS', 'GRASIM.NS',
-    'EICHERMOT.NS', 'JSWSTEEL.NS', 'BRITANNIA.NS', 'DIVISLAB.NS', 'HINDALCO.NS',
-    'HEROMOTOCO.NS', 'SHREECEM.NS', 'UPL.NS', 'APOLLOHOSP.NS', 'TATACONSUM.NS',
-    'SBILIFE.NS', 'ADANIENT.NS', 'BAJAJ-AUTO.NS', 'HDFCLIFE.NS', 'BPCL.NS'
-]
+# Load Nifty 50 tickers dynamically from configuration table
+# This replaces hardcoded ticker list with table-driven configuration
+try:
+    tickers_df = spark.table(f"{CATALOG_NAME}.config.nifty50_tickers") \
+        .filter("is_active = true") \
+        .select("ticker_symbol") \
+        .orderBy("ticker_id")
+    
+    NIFTY_50_TICKERS = [row.ticker_symbol for row in tickers_df.collect()]
+    print(f"✓ Loaded {len(NIFTY_50_TICKERS)} active tickers from config table")
+except Exception as e:
+    print(f"⚠️  Could not load tickers from config table: {str(e)}")
+    print("⚠️  Using fallback: First run 'config_nifty50_tickers.sql' to create the config table")
+    # Fallback to hardcoded list if config table doesn't exist yet
+    NIFTY_50_TICKERS = [
+        'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS',
+        'HINDUNILVR.NS', 'ITC.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'KOTAKBANK.NS',
+        'LT.NS', 'AXISBANK.NS', 'ASIANPAINT.NS', 'MARUTI.NS', 'HCLTECH.NS',
+        'SUNPHARMA.NS', 'TITAN.NS', 'BAJFINANCE.NS', 'ULTRACEMCO.NS', 'NESTLEIND.NS',
+        'WIPRO.NS', 'ONGC.NS', 'NTPC.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS',
+        'POWERGRID.NS', 'M&M.NS', 'TECHM.NS', 'ADANIPORTS.NS', 'BAJAJFINSV.NS',
+        'COALINDIA.NS', 'DRREDDY.NS', 'INDUSINDBK.NS', 'CIPLA.NS', 'GRASIM.NS',
+        'EICHERMOT.NS', 'JSWSTEEL.NS', 'BRITANNIA.NS', 'DIVISLAB.NS', 'HINDALCO.NS',
+        'HEROMOTOCO.NS', 'SHREECEM.NS', 'UPL.NS', 'APOLLOHOSP.NS', 'TATACONSUM.NS',
+        'SBILIFE.NS', 'ADANIENT.NS', 'BAJAJ-AUTO.NS', 'HDFCLIFE.NS', 'BPCL.NS'
+    ]
 
 # Date range: Last 5 years
 END_DATE = datetime.now()
@@ -34,12 +47,11 @@ START_DATE = END_DATE - timedelta(days=5*365)
 BRONZE_SCHEMA_DOC = f"""
 Bronze Layer Schema ({CATALOG_NAME}.bronze.stock_prices_raw):
 - ticker: string (stock symbol)
-- date: date (trading date)
+- date: timestamp (trading date)
 - open: double (opening price)
 - high: double (high price)
 - low: double (low price)
 - close: double (closing price)
-- adj_close: double (adjusted closing price)
 - volume: long (trading volume)
 - ingestion_timestamp: timestamp (when data was ingested)
 - source: string (data source identifier)
@@ -72,103 +84,66 @@ print("\n" + BRONZE_SCHEMA_DOC)
 
 # COMMAND ----------
 
-# DBTITLE 1,Install yfinance package
-# MAGIC %pip install yfinance --quiet
-
-# COMMAND ----------
-
 # DBTITLE 1,Step 3: Bronze Layer - Raw Ingestion Function
-# Step 3: Bronze Layer - Raw ingestion function
-
-import yfinance as yf
-from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DateType, DoubleType, LongType, TimestampType
-
-def fetch_stock_data_raw(ticker, start_date, end_date):
-    """
-    Fetch raw OHLCV data for a single ticker using yfinance.
-    Returns a pandas DataFrame with metadata columns added.
-    """
-    try:
-        # Download data from yfinance
-        stock = yf.Ticker(ticker)
-        df = stock.history(start=start_date, end=end_date)
-        
-        if df.empty:
-            print(f"⚠️  No data returned for {ticker}")
-            return None
-        
-        # Reset index to make Date a column
-        df = df.reset_index()
-        
-        # Add metadata columns
-        df['ticker'] = ticker
-        df['ingestion_timestamp'] = pd.Timestamp.now()
-        df['source'] = 'yfinance_api'
-        df['ingestion_date'] = pd.Timestamp.now().date()
-        
-        # Rename columns to match our schema
-        df = df.rename(columns={
-            'Date': 'date',
-            'Open': 'open',
-            'High': 'high',
-            'Low': 'low',
-            'Close': 'close',
-            'Volume': 'volume'
-        })
-        
-        # Select only the columns we need (drop Dividends, Stock Splits if present)
-        columns_to_keep = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 
-                          'ingestion_timestamp', 'source', 'ingestion_date']
-        df = df[[col for col in columns_to_keep if col in df.columns]]
-        
-        return df
-        
-    except Exception as e:
-        print(f"❌ Error fetching data for {ticker}: {str(e)}")
-        return None
-
-def ingest_to_bronze(tickers, start_date, end_date, bronze_table=f"{CATALOG_NAME}.bronze.stock_prices_raw"):
-    """
-    Ingest raw stock data for multiple tickers into Bronze Delta table.
-    """
-    all_data = []
-    
-    print(f"Starting ingestion for {len(tickers)} tickers...\n")
-    
-    for i, ticker in enumerate(tickers, 1):
-        print(f"[{i}/{len(tickers)}] Fetching {ticker}...", end=" ")
-        df = fetch_stock_data_raw(ticker, start_date, end_date)
-        
-        if df is not None:
-            all_data.append(df)
-            print(f"✓ Got {len(df)} rows")
-        else:
-            print("✗ Skipped")
-    
-    if not all_data:
-        print("\n❌ No data fetched. Aborting.")
-        return
-    
-    # Combine all data
-    combined_df = pd.concat(all_data, ignore_index=True)
-    
-    # Convert to Spark DataFrame
-    spark_df = spark.createDataFrame(combined_df)
-    
-    # Write to Delta table partitioned by ingestion_date
-    print(f"\nWriting {len(combined_df)} total rows to {bronze_table}...")
-    
-    spark_df.write \
-        .format("delta") \
-        .mode("append") \
-        .partitionBy("ingestion_date", "ticker") \
-        .saveAsTable(bronze_table)
-    
-    print(f"✓ Successfully ingested data to {bronze_table}")
-    return spark_df
-
-print("✓ Bronze layer ingestion functions defined")
+# MAGIC %pip install yfinance
+# MAGIC
+# MAGIC import yfinance as yf
+# MAGIC from pyspark.sql import functions as F
+# MAGIC
+# MAGIC def fetch_stock_data_raw(ticker, start_date, end_date):
+# MAGIC     try:
+# MAGIC         stock = yf.Ticker(ticker)
+# MAGIC         df = stock.history(start=start_date, end=end_date)
+# MAGIC         if df.empty:
+# MAGIC             print(f"⚠️  No data returned for {ticker}")
+# MAGIC             return None
+# MAGIC         df = df.reset_index()
+# MAGIC         df['ticker'] = ticker
+# MAGIC         df['ingestion_timestamp'] = pd.Timestamp.now()
+# MAGIC         df['source'] = 'yfinance_api'
+# MAGIC         df['ingestion_date'] = pd.Timestamp.now().date()
+# MAGIC         df = df.rename(columns={
+# MAGIC             'Date': 'date',
+# MAGIC             'Open': 'open',
+# MAGIC             'High': 'high',
+# MAGIC             'Low': 'low',
+# MAGIC             'Close': 'close',
+# MAGIC             'Volume': 'volume'
+# MAGIC         })
+# MAGIC         columns_to_keep = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume', 
+# MAGIC                           'ingestion_timestamp', 'source', 'ingestion_date']
+# MAGIC         df = df[[col for col in columns_to_keep if col in df.columns]]
+# MAGIC         return df
+# MAGIC     except Exception as e:
+# MAGIC         print(f"❌ Error fetching data for {ticker}: {str(e)}")
+# MAGIC         return None
+# MAGIC
+# MAGIC def ingest_to_bronze(tickers, start_date, end_date, bronze_table=f"{CATALOG_NAME}.bronze.stock_prices_raw"):
+# MAGIC     all_data = []
+# MAGIC     print(f"Starting ingestion for {len(tickers)} tickers...\n")
+# MAGIC     for i, ticker in enumerate(tickers, 1):
+# MAGIC         print(f"[{i}/{len(tickers)}] Fetching {ticker}...", end=" ")
+# MAGIC         df = fetch_stock_data_raw(ticker, start_date, end_date)
+# MAGIC         if df is not None:
+# MAGIC             all_data.append(df)
+# MAGIC             print(f"✓ Got {len(df)} rows")
+# MAGIC         else:
+# MAGIC             print("✗ Skipped")
+# MAGIC     if not all_data:
+# MAGIC         print("\n❌ No data fetched. Aborting.")
+# MAGIC         return
+# MAGIC     combined_df = pd.concat(all_data, ignore_index=True)
+# MAGIC     spark_df = spark.createDataFrame(combined_df)
+# MAGIC     print(f"\nWriting {len(combined_df)} total rows to {bronze_table}...")
+# MAGIC     spark_df.write \
+# MAGIC         .format("delta") \
+# MAGIC         .mode("append") \
+# MAGIC         .partitionBy("ingestion_date", "ticker") \
+# MAGIC         .saveAsTable(bronze_table)
+# MAGIC     print(f"✓ Successfully ingested data to {bronze_table}")
+# MAGIC     return spark_df
+# MAGIC
+# MAGIC print("✓ Bronze layer ingestion functions defined")
 
 # COMMAND ----------
 
