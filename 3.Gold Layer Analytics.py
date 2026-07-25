@@ -398,6 +398,583 @@ display(df_market_overview.orderBy(F.desc("date")).limit(5))
 
 # COMMAND ----------
 
+# DBTITLE 1,Gold Table 5: Multi-Timeframe Performance Metrics
+# Gold Table 5: Multi-Timeframe Performance Metrics
+# Calculate returns and volatility over multiple time periods (7/30/90/180 days)
+# Spot momentum trends and consistency patterns
+
+from pyspark.sql import Window
+from pyspark.sql.types import LongType
+
+print("\nBuilding Multi-Timeframe Performance Metrics...\n")
+
+# Define windows for different timeframes
+window_7 = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-6, 0)
+window_30 = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-29, 0)
+window_90 = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-89, 0)
+window_180 = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-179, 0)
+
+# Window for calculating returns (need previous close)
+window_lag_7 = Window.partitionBy("ticker_standard").orderBy("date")
+window_lag_30 = Window.partitionBy("ticker_standard").orderBy("date")
+window_lag_90 = Window.partitionBy("ticker_standard").orderBy("date")
+window_lag_180 = Window.partitionBy("ticker_standard").orderBy("date")
+
+df_multitime = df_silver_with_sector.withColumn(
+    "close_7d_ago", F.lag("close", 7).over(window_lag_7)
+).withColumn(
+    "close_30d_ago", F.lag("close", 30).over(window_lag_30)
+).withColumn(
+    "close_90d_ago", F.lag("close", 90).over(window_lag_90)
+).withColumn(
+    "close_180d_ago", F.lag("close", 180).over(window_lag_180)
+).withColumn(
+    "return_7d_pct",
+    F.round(((F.col("close") - F.col("close_7d_ago")) / F.col("close_7d_ago")) * 100, 2)
+).withColumn(
+    "return_30d_pct",
+    F.round(((F.col("close") - F.col("close_30d_ago")) / F.col("close_30d_ago")) * 100, 2)
+).withColumn(
+    "return_90d_pct",
+    F.round(((F.col("close") - F.col("close_90d_ago")) / F.col("close_90d_ago")) * 100, 2)
+).withColumn(
+    "return_180d_pct",
+    F.round(((F.col("close") - F.col("close_180d_ago")) / F.col("close_180d_ago")) * 100, 2)
+).withColumn(
+    "volatility_7d",
+    F.round(F.stddev("daily_return_pct").over(window_7), 2)
+).withColumn(
+    "volatility_30d",
+    F.round(F.stddev("daily_return_pct").over(window_30), 2)
+).withColumn(
+    "volatility_90d",
+    F.round(F.stddev("daily_return_pct").over(window_90), 2)
+).withColumn(
+    "positive_days_30d",
+    F.sum(F.when(F.col("daily_return_pct") > 0, 1).otherwise(0)).over(window_30)
+).withColumn(
+    "consistency_score_30d",
+    F.round((F.col("positive_days_30d") / 30.0) * 100, 1)
+).withColumn(
+    "high_30d", F.max("high").over(window_30)
+).withColumn(
+    "max_drawdown_30d_pct",
+    F.round(((F.col("close") - F.col("high_30d")) / F.col("high_30d")) * 100, 2)
+)
+
+# Select final columns
+GOLD_MULTITIME = f"{GOLD_SCHEMA}.stock_multitime_performance"
+
+df_multitime_final = df_multitime.select(
+    "ticker_standard",
+    "sector",
+    "date",
+    "close",
+    "return_7d_pct",
+    "return_30d_pct",
+    "return_90d_pct",
+    "return_180d_pct",
+    "volatility_7d",
+    "volatility_30d",
+    "volatility_90d",
+    "consistency_score_30d",
+    "max_drawdown_30d_pct"
+)
+
+# Write to Gold table
+print(f"Writing to {GOLD_MULTITIME}...")
+
+df_multitime_final.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .partitionBy("date") \
+    .saveAsTable(GOLD_MULTITIME)
+
+print(f"✓ Created {GOLD_MULTITIME}")
+print(f"  Records: {df_multitime_final.count():,}")
+print("\nSample - Top 30-day performers:")
+latest_date = df_multitime_final.agg(F.max("date")).collect()[0][0]
+display(
+    df_multitime_final
+    .filter(F.col("date") == latest_date)
+    .orderBy(F.desc("return_30d_pct"))
+    .limit(5)
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,Gold Table 6: Relative Strength Analysis
+# Gold Table 6: Relative Strength Analysis
+# Compare each stock's performance vs its sector and the overall market
+# Identify sector leaders and laggards
+
+print("\nBuilding Relative Strength Analysis...\n")
+
+# Calculate market average return (proxy for market index)
+df_market_return = df_silver_with_sector.groupBy("date").agg(
+    F.round(F.avg("daily_return_pct"), 2).alias("market_return_pct")
+)
+
+# Calculate sector average returns
+df_sector_return = df_silver_with_sector.groupBy("sector", "date").agg(
+    F.round(F.avg("daily_return_pct"), 2).alias("sector_return_pct")
+)
+
+# Join stock data with market and sector benchmarks
+df_relative = df_silver_with_sector.join(
+    df_market_return, on="date", how="left"
+).join(
+    df_sector_return, on=["sector", "date"], how="left"
+).withColumn(
+    "outperformance_vs_sector_pct",
+    F.round(F.col("daily_return_pct") - F.col("sector_return_pct"), 2)
+).withColumn(
+    "outperformance_vs_market_pct",
+    F.round(F.col("daily_return_pct") - F.col("market_return_pct"), 2)
+).withColumn(
+    "sector_vs_market_pct",
+    F.round(F.col("sector_return_pct") - F.col("market_return_pct"), 2)
+)
+
+# Calculate percentile ranks within sector
+window_sector_rank = Window.partitionBy("sector", "date").orderBy(F.desc("daily_return_pct"))
+
+df_relative = df_relative.withColumn(
+    "rank_in_sector", F.row_number().over(window_sector_rank)
+).withColumn(
+    "total_in_sector", F.count("ticker_standard").over(Window.partitionBy("sector", "date"))
+).withColumn(
+    "percentile_in_sector",
+    F.round((1 - (F.col("rank_in_sector") - 1) / F.col("total_in_sector")) * 100, 1)
+)
+
+# Classify relative strength
+df_relative = df_relative.withColumn(
+    "relative_strength_label",
+    F.when(
+        (F.col("outperformance_vs_sector_pct") > 0) & (F.col("outperformance_vs_market_pct") > 0),
+        "Sector Leader"
+    ).when(
+        (F.col("outperformance_vs_sector_pct") > 0) & (F.col("outperformance_vs_market_pct") <= 0),
+        "Sector Outperformer"
+    ).when(
+        (F.col("outperformance_vs_sector_pct") <= 0) & (F.col("outperformance_vs_market_pct") > 0),
+        "Market Outperformer"
+    ).otherwise("Underperformer")
+)
+
+# Select final columns
+GOLD_RELATIVE = f"{GOLD_SCHEMA}.stock_relative_strength"
+
+df_relative_final = df_relative.select(
+    "ticker_standard",
+    "sector",
+    "date",
+    "close",
+    "daily_return_pct",
+    "sector_return_pct",
+    "market_return_pct",
+    "outperformance_vs_sector_pct",
+    "outperformance_vs_market_pct",
+    "sector_vs_market_pct",
+    "percentile_in_sector",
+    "rank_in_sector",
+    "relative_strength_label"
+)
+
+# Write to Gold table
+print(f"Writing to {GOLD_RELATIVE}...")
+
+df_relative_final.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .partitionBy("date") \
+    .saveAsTable(GOLD_RELATIVE)
+
+print(f"✓ Created {GOLD_RELATIVE}")
+print(f"  Records: {df_relative_final.count():,}")
+print("\nSample - Sector Leaders:")
+latest_date = df_relative_final.agg(F.max("date")).collect()[0][0]
+display(
+    df_relative_final
+    .filter((F.col("date") == latest_date) & (F.col("relative_strength_label") == "Sector Leader"))
+    .orderBy(F.desc("outperformance_vs_sector_pct"))
+    .limit(5)
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,Gold Table 7: Technical Levels & Volume Breakouts
+# Gold Table 7: Technical Levels & Volume Breakouts
+# Support/resistance levels, 52-week highs/lows, volume anomalies
+# Pre-compute key technical signals for daily screening
+
+print("\nBuilding Technical Levels & Volume Breakouts...\n")
+
+# Windows for technical calculations
+window_52w = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-251, 0)  # ~252 trading days/year
+window_30d = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-29, 0)
+window_20d_vol = Window.partitionBy("ticker_standard").orderBy("date").rowsBetween(-19, 0)
+
+df_technical = df_silver_with_sector.withColumn(
+    "high_52w", F.max("high").over(window_52w)
+).withColumn(
+    "low_52w", F.min("low").over(window_52w)
+).withColumn(
+    "distance_from_52w_high_pct",
+    F.round(((F.col("close") - F.col("high_52w")) / F.col("high_52w")) * 100, 2)
+).withColumn(
+    "distance_from_52w_low_pct",
+    F.round(((F.col("close") - F.col("low_52w")) / F.col("low_52w")) * 100, 2)
+).withColumn(
+    "high_30d", F.max("high").over(window_30d)
+).withColumn(
+    "low_30d", F.min("low").over(window_30d)
+).withColumn(
+    "avg_volume_20d",
+    F.round(F.avg("volume").over(window_20d_vol), 0).cast(LongType())
+).withColumn(
+    "volume_ratio",
+    F.round(F.col("volume") / F.col("avg_volume_20d"), 2)
+).withColumn(
+    "volume_breakout_flag",
+    F.when(F.col("volume_ratio") >= 1.5, True).otherwise(False)
+).withColumn(
+    "at_52w_high_flag",
+    F.when(F.col("close") >= F.col("high_52w") * 0.98, True).otherwise(False)  # Within 2%
+).withColumn(
+    "at_52w_low_flag",
+    F.when(F.col("close") <= F.col("low_52w") * 1.02, True).otherwise(False)  # Within 2%
+).withColumn(
+    "breakout_30d_high_flag",
+    F.when(F.col("high") >= F.col("high_30d"), True).otherwise(False)
+).withColumn(
+    "breakdown_30d_low_flag",
+    F.when(F.col("low") <= F.col("low_30d"), True).otherwise(False)
+)
+
+# Bollinger Bands (20-day MA ± 2 standard deviations)
+df_technical = df_technical.withColumn(
+    "ma_20", F.round(F.avg("close").over(window_20d_vol), 2)
+).withColumn(
+    "stddev_20", F.round(F.stddev("close").over(window_20d_vol), 2)
+).withColumn(
+    "bb_upper", F.round(F.col("ma_20") + (2 * F.col("stddev_20")), 2)
+).withColumn(
+    "bb_lower", F.round(F.col("ma_20") - (2 * F.col("stddev_20")), 2)
+).withColumn(
+    "bb_position",
+    F.when(F.col("close") >= F.col("bb_upper"), "Above Upper Band")
+     .when(F.col("close") <= F.col("bb_lower"), "Below Lower Band")
+     .otherwise("Within Bands")
+)
+
+# Price + Volume confirmation (strong move on high volume)
+df_technical = df_technical.withColumn(
+    "strong_bullish_signal",
+    F.when(
+        (F.col("daily_return_pct") > 2) & (F.col("volume_breakout_flag") == True),
+        True
+    ).otherwise(False)
+).withColumn(
+    "strong_bearish_signal",
+    F.when(
+        (F.col("daily_return_pct") < -2) & (F.col("volume_breakout_flag") == True),
+        True
+    ).otherwise(False)
+)
+
+# Select final columns
+GOLD_TECHNICAL = f"{GOLD_SCHEMA}.stock_technical_levels"
+
+df_technical_final = df_technical.select(
+    "ticker_standard",
+    "sector",
+    "date",
+    "close",
+    "high_52w",
+    "low_52w",
+    "distance_from_52w_high_pct",
+    "distance_from_52w_low_pct",
+    "at_52w_high_flag",
+    "at_52w_low_flag",
+    "high_30d",
+    "low_30d",
+    "breakout_30d_high_flag",
+    "breakdown_30d_low_flag",
+    "volume",
+    "avg_volume_20d",
+    "volume_ratio",
+    "volume_breakout_flag",
+    "bb_upper",
+    "bb_lower",
+    "bb_position",
+    "strong_bullish_signal",
+    "strong_bearish_signal"
+)
+
+# Write to Gold table
+print(f"Writing to {GOLD_TECHNICAL}...")
+
+df_technical_final.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .partitionBy("date") \
+    .saveAsTable(GOLD_TECHNICAL)
+
+print(f"✓ Created {GOLD_TECHNICAL}")
+print(f"  Records: {df_technical_final.count():,}")
+print("\nSample - Stocks at 52-week highs with volume breakout:")
+latest_date = df_technical_final.agg(F.max("date")).collect()[0][0]
+display(
+    df_technical_final
+    .filter(
+        (F.col("date") == latest_date) & 
+        (F.col("at_52w_high_flag") == True) & 
+        (F.col("volume_breakout_flag") == True)
+    )
+    .orderBy(F.desc("volume_ratio"))
+    .limit(5)
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,Query Gold Table 5: Multi-Timeframe Momentum Screener
+# MAGIC %sql
+# MAGIC -- Multi-Timeframe Momentum Screener
+# MAGIC -- Find stocks with consistent positive returns across all timeframes
+# MAGIC
+# MAGIC SELECT 
+# MAGIC     ticker_standard,
+# MAGIC     sector,
+# MAGIC     close,
+# MAGIC     return_7d_pct,
+# MAGIC     return_30d_pct,
+# MAGIC     return_90d_pct,
+# MAGIC     return_180d_pct,
+# MAGIC     consistency_score_30d,
+# MAGIC     volatility_30d,
+# MAGIC     max_drawdown_30d_pct
+# MAGIC FROM StockMarketLakehouse.gold.stock_multitime_performance
+# MAGIC WHERE date = (SELECT MAX(date) FROM StockMarketLakehouse.gold.stock_multitime_performance)
+# MAGIC     AND return_7d_pct > 0
+# MAGIC     AND return_30d_pct > 0
+# MAGIC     AND return_90d_pct > 0
+# MAGIC     AND consistency_score_30d > 60  -- Positive 60%+ of days
+# MAGIC ORDER BY return_30d_pct DESC
+# MAGIC LIMIT 10;
+
+# COMMAND ----------
+
+# DBTITLE 1,New Gold Tables Summary
+# MAGIC %md
+# MAGIC ---
+# MAGIC
+# MAGIC ## ✨ Enhanced Gold Layer - Advanced Analytics
+# MAGIC
+# MAGIC ### New Tables Added:
+# MAGIC
+# MAGIC #### **Table 5: stock_multitime_performance** 📊
+# MAGIC Multi-timeframe momentum analysis for systematic trend identification.
+# MAGIC
+# MAGIC **Key Metrics:**
+# MAGIC * **Returns**: 7-day, 30-day, 90-day, 180-day percentage returns
+# MAGIC * **Volatility**: Rolling volatility across 7/30/90-day windows
+# MAGIC * **Consistency Score**: % of positive days in last 30 days (60%+ = strong trend)
+# MAGIC * **Max Drawdown**: Worst peak-to-trough decline in last 30 days
+# MAGIC
+# MAGIC **Use Cases:**
+# MAGIC * Find sustained momentum (positive across all timeframes)
+# MAGIC * Compare short-term vs long-term trends (divergence signals)
+# MAGIC * Screen for consistency (avoid choppy movers)
+# MAGIC * Risk assessment (high returns + low volatility = sweet spot)
+# MAGIC
+# MAGIC **Sample Query:**
+# MAGIC ```sql
+# MAGIC -- Find stocks with consistent uptrend (all positive returns + high consistency)
+# MAGIC SELECT ticker_standard, return_30d_pct, consistency_score_30d, volatility_30d
+# MAGIC FROM gold.stock_multitime_performance
+# MAGIC WHERE date = CURRENT_DATE() - 1
+# MAGIC   AND return_7d_pct > 0 AND return_30d_pct > 0 AND return_90d_pct > 0
+# MAGIC   AND consistency_score_30d > 60
+# MAGIC ORDER BY return_30d_pct DESC;
+# MAGIC ```
+# MAGIC
+# MAGIC ---
+# MAGIC
+# MAGIC #### **Table 6: stock_relative_strength** 🏆
+# MAGIC Compare each stock's performance vs its sector and the overall market.
+# MAGIC
+# MAGIC **Key Metrics:**
+# MAGIC * **Outperformance vs Sector**: How much better/worse than sector peers
+# MAGIC * **Outperformance vs Market**: How much better/worse than market average
+# MAGIC * **Percentile in Sector**: Rank within sector (100 = top performer)
+# MAGIC * **Relative Strength Label**: Sector Leader / Sector Outperformer / Market Outperformer / Underperformer
+# MAGIC
+# MAGIC **Use Cases:**
+# MAGIC * Find **Sector Leaders** (beating both sector AND market) — strongest stocks
+# MAGIC * Spot **sector rotation** (which sectors are leading/lagging the market)
+# MAGIC * Identify **relative weakness** (underperformers ready to catch up)
+# MAGIC * Build diversified portfolios (pick top stocks from each sector)
+# MAGIC
+# MAGIC **Sample Query:**
+# MAGIC ```sql
+# MAGIC -- Find top 3 stocks from each sector (by relative strength)
+# MAGIC WITH ranked AS (
+# MAGIC   SELECT *, ROW_NUMBER() OVER (PARTITION BY sector ORDER BY percentile_in_sector DESC) as rn
+# MAGIC   FROM gold.stock_relative_strength
+# MAGIC   WHERE date = CURRENT_DATE() - 1
+# MAGIC )
+# MAGIC SELECT sector, ticker_standard, percentile_in_sector, relative_strength_label
+# MAGIC FROM ranked WHERE rn <= 3
+# MAGIC ORDER BY sector, rn;
+# MAGIC ```
+# MAGIC
+# MAGIC ---
+# MAGIC
+# MAGIC #### **Table 7: stock_technical_levels** 🎯
+# MAGIC Pre-computed technical levels and volume breakout signals.
+# MAGIC
+# MAGIC **Key Metrics:**
+# MAGIC * **52-Week High/Low**: Distance from annual extremes (in %)
+# MAGIC * **30-Day High/Low**: Recent range boundaries
+# MAGIC * **Volume Ratio**: Current volume / 20-day average (>1.5 = breakout)
+# MAGIC * **Bollinger Bands**: Upper/lower bands + position (Above/Within/Below)
+# MAGIC * **Breakout Flags**: 30-day high breakout, volume breakout
+# MAGIC * **Strong Signals**: Price move >2% + volume breakout
+# MAGIC
+# MAGIC **Use Cases:**
+# MAGIC * **Breakout screening** (price breaking 30-day high + volume confirmation)
+# MAGIC * **Support/resistance** (52-week levels as key zones)
+# MAGIC * **Mean reversion plays** (oversold at lower Bollinger Band)
+# MAGIC * **Volume confirmation** (avoid false breakouts with low volume)
+# MAGIC
+# MAGIC **Sample Query:**
+# MAGIC ```sql
+# MAGIC -- Find stocks near 52-week highs with increasing volume
+# MAGIC SELECT ticker_standard, close, distance_from_52w_high_pct, volume_ratio
+# MAGIC FROM gold.stock_technical_levels
+# MAGIC WHERE date = CURRENT_DATE() - 1
+# MAGIC   AND distance_from_52w_high_pct > -5  -- Within 5% of 52-week high
+# MAGIC   AND volume_ratio > 1.2               -- 20% above average volume
+# MAGIC ORDER BY distance_from_52w_high_pct DESC;
+# MAGIC ```
+# MAGIC
+# MAGIC ---
+# MAGIC
+# MAGIC ### Daily Analysis Workflow 📅
+# MAGIC
+# MAGIC **Morning Routine (Pre-Market):**
+# MAGIC 1. Check [market_overview_daily](#followup) for overall sentiment (Bullish/Bearish/Neutral)
+# MAGIC 2. Review [sector_daily_metrics](#followup) to spot hot/cold sectors
+# MAGIC 3. Run Multi-Timeframe query to find sustained momentum stocks
+# MAGIC 4. Run Relative Strength query to find Sector Leaders
+# MAGIC
+# MAGIC **Intraday Watch:**
+# MAGIC 5. Monitor [top_movers_daily](#followup) for extreme moves
+# MAGIC 6. Check Technical Levels table for breakout candidates
+# MAGIC
+# MAGIC **Post-Market Review:**
+# MAGIC 7. Update data (run Bronze → Silver → Gold pipeline)
+# MAGIC 8. Review strong signals (price + volume confirmation)
+# MAGIC 9. Add to watchlist for next day
+# MAGIC
+# MAGIC ---
+# MAGIC
+# MAGIC ### Gold Layer Schema (Complete)
+# MAGIC
+# MAGIC ```
+# MAGIC StockMarketLakehouse.gold/
+# MAGIC ├── ticker_sector_mapping (reference)
+# MAGIC ├── stock_daily_metrics (core - MA 20/50/200, trend signals)
+# MAGIC ├── sector_daily_metrics (aggregations - sector breadth)
+# MAGIC ├── top_movers_daily (rankings - top 10 gainers/losers)
+# MAGIC ├── market_overview_daily (summary - market health)
+# MAGIC ├── stock_multitime_performance (NEW - momentum analysis)
+# MAGIC ├── stock_relative_strength (NEW - sector/market comparison)
+# MAGIC └── stock_technical_levels (NEW - breakouts, support/resistance)
+# MAGIC ```
+# MAGIC
+# MAGIC **Total Records: 60,710 per table** (50 stocks × 5 years daily data)
+# MAGIC
+# MAGIC ---
+# MAGIC
+# MAGIC ### What Makes This Production-Ready? ✅
+# MAGIC
+# MAGIC **Data Engineering Best Practices:**
+# MAGIC * ✓ **Incremental processing ready** (partitioned by date)
+# MAGIC * ✓ **Pre-computed aggregates** (avoid expensive on-the-fly calculations)
+# MAGIC * ✓ **Normalized metrics** (percentages, ratios, flags for easy filtering)
+# MAGIC * ✓ **Reference data separation** (ticker_sector_mapping)
+# MAGIC * ✓ **Query optimization** (indexed on date, common filters)
+# MAGIC
+# MAGIC **Analytics Depth:**
+# MAGIC * ✓ **Multi-dimensional** (time, sector, technical, relative)
+# MAGIC * ✓ **Actionable signals** (flags, labels, thresholds)
+# MAGIC * ✓ **Scalable patterns** (window functions, ranking)
+# MAGIC
+# MAGIC **Interview Talking Points:**
+# MAGIC * "Built 7 gold tables optimized for daily stock analysis"
+# MAGIC * "Implemented multi-timeframe momentum tracking (7/30/90/180-day)"
+# MAGIC * "Created relative strength analysis comparing stocks vs sector and market"
+# MAGIC * "Pre-computed technical levels (52-week, Bollinger Bands, volume breakouts)"
+# MAGIC * "Designed for BI consumption with pre-aggregated metrics and flags"
+
+# COMMAND ----------
+
+# DBTITLE 1,Query Gold Table 6: Find Sector Leaders
+# MAGIC %sql
+# MAGIC -- Find Sector Leaders (outperforming both sector AND market)
+# MAGIC -- Great for identifying rotation into strong stocks
+# MAGIC
+# MAGIC SELECT 
+# MAGIC     ticker_standard,
+# MAGIC     sector,
+# MAGIC     close,
+# MAGIC     daily_return_pct,
+# MAGIC     sector_return_pct,
+# MAGIC     market_return_pct,
+# MAGIC     outperformance_vs_sector_pct,
+# MAGIC     outperformance_vs_market_pct,
+# MAGIC     percentile_in_sector,
+# MAGIC     relative_strength_label
+# MAGIC FROM StockMarketLakehouse.gold.stock_relative_strength
+# MAGIC WHERE date = (SELECT MAX(date) FROM StockMarketLakehouse.gold.stock_relative_strength)
+# MAGIC     AND relative_strength_label = 'Sector Leader'
+# MAGIC     AND percentile_in_sector >= 80  -- Top 20% in sector
+# MAGIC ORDER BY outperformance_vs_sector_pct DESC
+# MAGIC LIMIT 10;
+
+# COMMAND ----------
+
+# DBTITLE 1,Query Gold Table 7: Breakout Candidates Screener
+# MAGIC %sql
+# MAGIC -- Breakout Candidates: Stocks breaking 30-day highs with volume confirmation
+# MAGIC -- Classic momentum setup for entries
+# MAGIC
+# MAGIC SELECT 
+# MAGIC     ticker_standard,
+# MAGIC     sector,
+# MAGIC     close,
+# MAGIC     distance_from_52w_high_pct,
+# MAGIC     high_30d,
+# MAGIC     volume,
+# MAGIC     avg_volume_20d,
+# MAGIC     volume_ratio,
+# MAGIC     bb_position,
+# MAGIC     breakout_30d_high_flag,
+# MAGIC     volume_breakout_flag,
+# MAGIC     strong_bullish_signal
+# MAGIC FROM StockMarketLakehouse.gold.stock_technical_levels
+# MAGIC WHERE date = (SELECT MAX(date) FROM StockMarketLakehouse.gold.stock_technical_levels)
+# MAGIC     AND breakout_30d_high_flag = TRUE
+# MAGIC     AND volume_breakout_flag = TRUE
+# MAGIC     AND distance_from_52w_high_pct > -10  -- Near 52-week highs
+# MAGIC ORDER BY volume_ratio DESC
+# MAGIC LIMIT 10;
+
+# COMMAND ----------
+
 # DBTITLE 1,Verify Gold Tables - Summary
 # MAGIC %sql
 # MAGIC -- Verify all Gold tables were created
