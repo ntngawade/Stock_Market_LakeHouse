@@ -414,6 +414,83 @@ if LAYER in ["all", "gold"]:
 
 # COMMAND ----------
 
+# DBTITLE 1,Task 4: Dashboard Refresh
+# Task 4: Refresh Dashboard After Data Load
+# Refreshes the Stock Market Analysis Dashboard with latest data
+
+def refresh_dashboard():
+    """
+    Refresh the Stock Market Analysis Dashboard.
+    """
+    status.start_layer("dashboard_refresh")
+    
+    try:
+        from databricks.sdk import WorkspaceClient
+        from databricks.sdk.service.sql import WarehouseType
+        
+        # Dashboard configuration
+        DASHBOARD_ID = "01f1882f566e19eebabed1cd928b4b63"
+        DASHBOARD_NAME = "Stock Market Analysis Dashboard"
+        
+        print(f"Refreshing dashboard: {DASHBOARD_NAME}")
+        print(f"Dashboard ID: {DASHBOARD_ID}")
+        
+        # Initialize Databricks SDK client
+        w = WorkspaceClient()
+        
+        try:
+            # Get dashboard details
+            dashboard = w.lakeview.get(DASHBOARD_ID)
+            print(f"✓ Found dashboard: {dashboard.display_name}")
+            
+            # Publish the dashboard to refresh with latest data
+            # This ensures all widgets query the updated gold tables
+            published = w.lakeview.publish(DASHBOARD_ID)
+            print(f"✓ Dashboard published and refreshed")
+            print(f"  Published version: {published.published_dashboard_id}")
+            
+            status.complete_layer(
+                "dashboard_refresh",
+                records_processed=1,
+                metrics={
+                    "dashboard_id": DASHBOARD_ID,
+                    "dashboard_name": DASHBOARD_NAME,
+                    "status": "refreshed"
+                }
+            )
+            
+            return True
+            
+        except Exception as sdk_error:
+            print(f"⚠️  SDK method failed: {str(sdk_error)}")
+            print("Dashboard will auto-refresh on next view")
+            
+            status.complete_layer(
+                "dashboard_refresh",
+                records_processed=1,
+                metrics={
+                    "dashboard_id": DASHBOARD_ID,
+                    "status": "skipped - will auto-refresh",
+                    "note": "Dashboard queries will use latest data on next access"
+                }
+            )
+            return True
+        
+    except Exception as e:
+        print(f"⚠️  Dashboard refresh warning: {str(e)}")
+        print("Pipeline completed successfully. Dashboard will refresh on next view.")
+        status.complete_layer(
+            "dashboard_refresh",
+            records_processed=0,
+            metrics={"status": "skipped", "reason": str(e)}
+        )
+        return True  # Don't fail pipeline if dashboard refresh fails
+
+if LAYER in ["all", "gold"]:
+    refresh_dashboard()
+
+# COMMAND ----------
+
 # DBTITLE 1,Pipeline Execution Summary
 # Generate final summary
 final_status = status.get_summary()
@@ -433,6 +510,7 @@ dbutils.notebook.exit(json.dumps(final_status))
 # MAGIC 1. **Bronze Layer** - Fetches data from yfinance API
 # MAGIC 2. **Silver Layer** - Applies quality checks and cleaning
 # MAGIC 3. **Gold Layer** - Builds analytics tables with moving averages
+# MAGIC 4. **Dashboard Refresh** - Refreshes Stock Market Analysis Dashboard with latest data
 # MAGIC
 # MAGIC **Features:**
 # MAGIC * ✓ Parameterized execution (start_date, end_date, layer)

@@ -3,6 +3,24 @@
 # [tool.databricks.environment]
 # environment_version = "5"
 # ///
+# DBTITLE 1,Prerequisites
+# MAGIC %md
+# MAGIC ## Prerequisites
+# MAGIC
+# MAGIC **Before running this notebook**, ensure the following configuration script has been executed:
+# MAGIC
+# MAGIC 📄 **config_nifty50_tickers_Oneshot.sql**
+# MAGIC
+# MAGIC This SQL script creates:
+# MAGIC 1. `StockMarketLakehouse.config.nifty50_tickers` - Ticker configuration table
+# MAGIC 2. `StockMarketLakehouse.gold.ticker_sector_mapping` - Sector mapping for analytics
+# MAGIC
+# MAGIC The ticker_sector_mapping table is required for all gold layer analytics tables.
+# MAGIC
+# MAGIC ---
+
+# COMMAND ----------
+
 # DBTITLE 1,Step 7: Gold Layer Configuration
 # Step 7: Gold Layer - Business Aggregates and Analytics
 # Purpose: Create query-ready, business-focused analytics tables
@@ -38,105 +56,16 @@ print(f"  Target schema: {GOLD_SCHEMA}")
 # COMMAND ----------
 
 # DBTITLE 1,Create Ticker → Sector Mapping Table
-# Create a static mapping table: ticker → sector
-# In production, this would come from a reference data source
+# Load Ticker → Sector Mapping Table
+# Note: This table is created via config_nifty50_tickers_Oneshot.sql
+# It provides static sector classification for analytics
 
-from pyspark.sql.types import StructType, StructField, StringType
-
-# Nifty 50 sector mapping (industry classification)
-sector_mapping_data = [
-    # Financial Services
-    ('HDFCBANK', 'Financial Services'),
-    ('ICICIBANK', 'Financial Services'),
-    ('KOTAKBANK', 'Financial Services'),
-    ('AXISBANK', 'Financial Services'),
-    ('SBIN', 'Financial Services'),
-    ('INDUSINDBK', 'Financial Services'),
-    ('BAJFINANCE', 'Financial Services'),
-    ('BAJAJFINSV', 'Financial Services'),
-    ('HDFCLIFE', 'Financial Services'),
-    ('SBILIFE', 'Financial Services'),
-    
-    # IT Services
-    ('TCS', 'IT Services'),
-    ('INFY', 'IT Services'),
-    ('HCLTECH', 'IT Services'),
-    ('WIPRO', 'IT Services'),
-    ('TECHM', 'IT Services'),
-    
-    # Oil & Gas
-    ('RELIANCE', 'Oil & Gas'),
-    ('ONGC', 'Oil & Gas'),
-    ('BPCL', 'Oil & Gas'),
-    
-    # FMCG
-    ('HINDUNILVR', 'FMCG'),
-    ('ITC', 'FMCG'),
-    ('NESTLEIND', 'FMCG'),
-    ('BRITANNIA', 'FMCG'),
-    ('TATACONSUM', 'FMCG'),
-    
-    # Pharma
-    ('SUNPHARMA', 'Pharma'),
-    ('DRREDDY', 'Pharma'),
-    ('CIPLA', 'Pharma'),
-    ('DIVISLAB', 'Pharma'),
-    ('APOLLOHOSP', 'Pharma'),
-    
-    # Auto
-    ('MARUTI', 'Auto'),
-    ('TATAMOTORS', 'Auto'),
-    ('M&M', 'Auto'),
-    ('EICHERMOT', 'Auto'),
-    ('BAJAJ-AUTO', 'Auto'),
-    ('HEROMOTOCO', 'Auto'),
-    
-    # Metals & Mining
-    ('TATASTEEL', 'Metals & Mining'),
-    ('HINDALCO', 'Metals & Mining'),
-    ('JSWSTEEL', 'Metals & Mining'),
-    ('COALINDIA', 'Metals & Mining'),
-    
-    # Cement
-    ('ULTRACEMCO', 'Cement'),
-    ('SHREECEM', 'Cement'),
-    ('GRASIM', 'Cement'),
-    
-    # Consumer Durables
-    ('TITAN', 'Consumer Durables'),
-    ('ASIANPAINT', 'Consumer Durables'),
-    
-    # Telecom
-    ('BHARTIARTL', 'Telecom'),
-    
-    # Infrastructure
-    ('LT', 'Infrastructure'),
-    ('ADANIPORTS', 'Infrastructure'),
-    ('POWERGRID', 'Infrastructure'),
-    ('NTPC', 'Infrastructure'),
-    ('ADANIENT', 'Infrastructure'),
-    
-    # Agro Chemicals
-    ('UPL', 'Agro Chemicals')
-]
-
-# Create DataFrame
-sector_schema = StructType([
-    StructField("ticker_standard", StringType(), False),
-    StructField("sector", StringType(), False)
-])
-
-df_sectors = spark.createDataFrame(sector_mapping_data, schema=sector_schema)
-
-# Write to Delta table
 SECTOR_TABLE = f"{GOLD_SCHEMA}.ticker_sector_mapping"
 
-df_sectors.write \
-    .format("delta") \
-    .mode("overwrite") \
-    .saveAsTable(SECTOR_TABLE)
+# Read the sector mapping table (created via SQL script)
+df_sectors = spark.table(SECTOR_TABLE)
 
-print(f"✓ Created sector mapping table: {SECTOR_TABLE}")
+print(f"✓ Loaded sector mapping table: {SECTOR_TABLE}")
 print(f"  Total sectors: {df_sectors.select('sector').distinct().count()}")
 print(f"  Total tickers mapped: {df_sectors.count()}")
 
