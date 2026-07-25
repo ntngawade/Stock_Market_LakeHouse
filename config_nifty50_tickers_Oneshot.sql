@@ -163,3 +163,130 @@ print(f"Loaded {len(NIFTY_50_TICKERS)} active tickers from config table")
 
 -- View table history (if Change Data Feed is enabled)
 -- DESCRIBE HISTORY StockMarketLakehouse.config.nifty50_tickers;
+
+-- ==============================================================================
+-- GOLD LAYER: TICKER → SECTOR MAPPING TABLE
+-- Purpose: Static mapping table for gold layer analytics
+-- Note: Uses simplified sector categorization for analytics
+-- ==============================================================================
+
+-- Step 5: Create ticker_sector_mapping table in gold schema
+CREATE OR REPLACE TABLE StockMarketLakehouse.gold.ticker_sector_mapping (
+    ticker_standard STRING NOT NULL COMMENT 'Standardized ticker symbol (without .NS suffix)',
+    sector STRING NOT NULL COMMENT 'Industry sector for analytics'
+)
+COMMENT 'Ticker to sector mapping for gold layer analytics'
+TBLPROPERTIES (
+    'delta.enableChangeDataFeed' = 'false',
+    'quality' = 'gold',
+    'domain' = 'reference_data'
+);
+
+-- Step 6: Insert sector mappings (simplified categorization for analytics)
+INSERT INTO StockMarketLakehouse.gold.ticker_sector_mapping VALUES
+-- Financial Services (10 stocks)
+('HDFCBANK', 'Financial Services'),
+('ICICIBANK', 'Financial Services'),
+('KOTAKBANK', 'Financial Services'),
+('AXISBANK', 'Financial Services'),
+('SBIN', 'Financial Services'),
+('INDUSINDBK', 'Financial Services'),
+('BAJFINANCE', 'Financial Services'),
+('BAJAJFINSV', 'Financial Services'),
+('HDFCLIFE', 'Financial Services'),
+('SBILIFE', 'Financial Services'),
+
+-- IT Services (5 stocks)
+('TCS', 'IT Services'),
+('INFY', 'IT Services'),
+('HCLTECH', 'IT Services'),
+('WIPRO', 'IT Services'),
+('TECHM', 'IT Services'),
+
+-- Oil & Gas (3 stocks)
+('RELIANCE', 'Oil & Gas'),
+('ONGC', 'Oil & Gas'),
+('BPCL', 'Oil & Gas'),
+
+-- FMCG (5 stocks)
+('HINDUNILVR', 'FMCG'),
+('ITC', 'FMCG'),
+('NESTLEIND', 'FMCG'),
+('BRITANNIA', 'FMCG'),
+('TATACONSUM', 'FMCG'),
+
+-- Pharma (5 stocks)
+('SUNPHARMA', 'Pharma'),
+('DRREDDY', 'Pharma'),
+('CIPLA', 'Pharma'),
+('DIVISLAB', 'Pharma'),
+('APOLLOHOSP', 'Pharma'),
+
+-- Auto (6 stocks)
+('MARUTI', 'Auto'),
+('TATAMOTORS', 'Auto'),
+('M&M', 'Auto'),
+('EICHERMOT', 'Auto'),
+('BAJAJ-AUTO', 'Auto'),
+('HEROMOTOCO', 'Auto'),
+
+-- Metals & Mining (4 stocks)
+('TATASTEEL', 'Metals & Mining'),
+('HINDALCO', 'Metals & Mining'),
+('JSWSTEEL', 'Metals & Mining'),
+('COALINDIA', 'Metals & Mining'),
+
+-- Cement (3 stocks)
+('ULTRACEMCO', 'Cement'),
+('SHREECEM', 'Cement'),
+('GRASIM', 'Cement'),
+
+-- Consumer Durables (2 stocks)
+('TITAN', 'Consumer Durables'),
+('ASIANPAINT', 'Consumer Durables'),
+
+-- Telecom (1 stock)
+('BHARTIARTL', 'Telecom'),
+
+-- Infrastructure (5 stocks)
+('LT', 'Infrastructure'),
+('ADANIPORTS', 'Infrastructure'),
+('POWERGRID', 'Infrastructure'),
+('NTPC', 'Infrastructure'),
+('ADANIENT', 'Infrastructure'),
+
+-- Agro Chemicals (1 stock)
+('UPL', 'Agro Chemicals');
+
+-- Step 7: Verify ticker_sector_mapping data
+SELECT 
+    sector,
+    COUNT(*) as ticker_count
+FROM StockMarketLakehouse.gold.ticker_sector_mapping
+GROUP BY sector
+ORDER BY ticker_count DESC;
+
+SELECT COUNT(*) as total_tickers_mapped
+FROM StockMarketLakehouse.gold.ticker_sector_mapping;
+
+-- ==============================================================================
+-- SECTOR MAPPING USAGE IN GOLD LAYER
+-- ==============================================================================
+
+-- Example: Join with stock data for sector-level analytics
+/*
+SELECT 
+    s.date,
+    m.sector,
+    COUNT(DISTINCT s.ticker_standard) as stock_count,
+    AVG(s.daily_return_pct) as avg_return
+FROM StockMarketLakehouse.silver.stock_prices_clean s
+JOIN StockMarketLakehouse.gold.ticker_sector_mapping m
+    ON s.ticker_standard = m.ticker_standard
+GROUP BY s.date, m.sector
+ORDER BY s.date DESC, avg_return DESC;
+*/
+
+-- ==============================================================================
+-- END OF CONFIGURATION SCRIPT
+-- ==============================================================================
